@@ -1,0 +1,1788 @@
+openapi: 3.0.3
+info:
+  title: Banxa API
+  version: "v2" # Reflecting the /v2 in the provided URL structure
+  description: |-
+    API for Banxa services, enabling crypto purchases, KYC processes, and more.
+    This specification is reverse-engineered from the Banxa PHP SDK and official API documentation, with server URL adjusted based on user-provided examples.
+    Authentication is performed via HMAC-SHA256 signatures using API Key, API Secret, Timestamp, and Nonce.
+    - X-BANXA-KEY: Your API Key.
+    - X-BANXA-SIGNATURE: The HMAC-SHA256 signature.
+    - X-BANXA-TIMESTAMP: Current UNIX timestamp.
+    - X-BANXA-NONCE: A unique, randomly generated string for each request.
+  contact:
+    name: Banxa Support
+    url: https://support.banxa.com/
+
+servers:
+  - url: https://api.banxa.com/{partner}/v2
+    description: Main API endpoint structure. Replace {partner} with your identifier.
+    variables:
+      partner:
+        default: your-partner-id
+        description: Your specific Banxa partner identifier.
+  - url: https://banxa.com/api # Fallback / Sandbox often mentioned
+    description: Generic Banxa API endpoint (potentially sandbox, confirm specific usage).
+
+tags:
+  - name: Fiats
+    description: Operations related to fiat currencies.
+  - name: Coins
+    description: Operations related to crypto currencies.
+  - name: Countries
+    description: Operations related to supported countries.
+  - name: PaymentMethods
+    description: Operations related to payment methods.
+  - name: Prices
+    description: Operations related to price inquiries (distinct from specific quotes).
+  - name: Quotes
+    description: Operations related to creating and retrieving specific quotes.
+  - name: Orders
+    description: Operations related to creating and managing orders.
+  - name: SellOrders
+    description: Operations specific to confirming sell orders.
+  - name: NftOrders
+    description: Operations related to NFT orders.
+  - name: KYC
+    description: Operations related to Know Your Customer (KYC) processes, specifically the SDK's /kyc/accounts flow.
+  # The "Create Identity" flow ( /identity/applications ) seems like a separate or newer system.
+  # If it's covered by a different set of Api/Model files in the SDK, it would get its own tag.
+
+components:
+  securitySchemes:
+    BanxaAuth:
+      type: apiKey
+      in: header
+      name: X-BANXA-KEY
+      description: Your Banxa API Key.
+
+  parameters:
+    # Common HMAC authentication headers (excluding X-BANXA-KEY which is covered by securitySchemes)
+    HeaderSignature:
+      name: X-BANXA-SIGNATURE
+      in: header
+      required: true
+      description: HMAC-SHA256 signature of (HTTP_METHOD + REQUEST_URI + REQUEST_BODY + CURRENT_UNIX_TIMESTAMP + NONCE).
+      schema:
+        type: string
+    HeaderTimestamp:
+      name: X-BANXA-TIMESTAMP
+      in: header
+      required: true
+      description: Current UNIX timestamp (seconds).
+      schema:
+        type: integer
+        format: int64
+    HeaderNonce:
+      name: X-BANXA-NONCE
+      in: header
+      required: true
+      description: A unique, randomly generated string for each request (e.g., UUID). Max 255 chars.
+      schema:
+        type: string
+        maxLength: 255
+
+    # Common pagination query parameters
+    QueryPage:
+      name: page
+      in: query
+      description: Page number for pagination.
+      required: false
+      schema:
+        type: integer
+        default: 1
+        minimum: 1
+    QueryPerPage:
+      name: per_page
+      in: query
+      description: Number of items per page.
+      required: false
+      schema:
+        type: integer
+        default: 25 # Common default, verify from SDK/docs if specified
+        minimum: 1
+        maximum: 100 # Common max, verify
+
+    # Common path parameters
+    PathOrderId:
+      name: order_id # As seen in OrdersApi.php paths
+      in: path
+      required: true
+      description: Unique identifier of the order.
+      schema:
+        type: string # SDK method signatures for getOrder use string for order_id.
+                     # Docs confirm string for order_id e.g. "f91cbdf6-c8e5-4f58-911a-430835945a1d"
+    PathQuoteId:
+      name: id # As seen in QuotesApi.php getQuote path
+      in: path
+      required: true
+      description: Unique identifier of the quote.
+      schema:
+        type: string # SDK QuotesApi getQuote method takes string $id. Response Quote model ID is int.
+                     # Let's assume path param is string, response ID int.
+                     # Doc for GET /quotes/{id} is missing, relying on SDK.
+
+  schemas:
+    # --- Error Schemas (based on reference/errors) ---
+    ApiErrorSource:
+      type: object
+      properties:
+        pointer:
+          type: string
+          description: "A JSON Pointer [RFC6901] to the associated entity in the request document [e.g. \"/data\" for a primary data object, or \"/data/attributes/title\" for a specific attribute]."
+          example: "/data/attributes/fiat_amount"
+        parameter:
+          type: string
+          description: "A string indicating which URI query parameter caused the error."
+          example: "target_currency"
+    ApiError:
+      type: object
+      properties:
+        status:
+          type: string
+          description: The HTTP status code applicable to this problem, expressed as a string value.
+          example: "422"
+        title:
+          type: string
+          description: A short, human-readable summary of the problem that SHOULD NOT change from occurrence to occurrence of the problem, except for purposes of localization.
+          example: "Invalid Attribute"
+        detail:
+          type: string
+          description: A human-readable explanation specific to this occurrence of the problem.
+          example: "Fiat amount must be greater than or equal to 20."
+        code: # Optional, sometimes present for more specific Banxa error codes
+          type: string
+          description: A Banxa-specific error code.
+          example: "E0015_INVALID_FIAT_AMOUNT"
+        source:
+          $ref: '#/components/schemas/ApiErrorSource'
+          nullable: true
+    ApiErrorResponse:
+      type: object
+      required:
+        - errors
+      properties:
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiError'
+
+    # --- Common Schemas ---
+    Pagination: # Based on Model/Pagination.php and doc examples
+      type: object
+      properties:
+        current_page: # from Model/Pagination.php getModelName()
+          type: integer
+          example: 1
+        records_per_page: # from Model/Pagination.php
+          type: integer
+          example: 25
+        total_records: # from Model/Pagination.php
+          type: integer
+          example: 120
+        total_pages: # from Model/Pagination.php
+          type: integer
+          example: 5
+
+    # --- Fiat Schemas (Model/Fiat.php, Model/GetFiats200Response.php) ---
+    Fiat: # Based on Model/Fiat.php and docs
+      type: object
+      properties:
+        fiat_code: # From Model/Fiat::$fiat_code
+          type: string
+          description: The unique code for the fiat currency.
+          example: "AUD"
+        fiat_name: # From Model/Fiat::$fiat_name
+          type: string
+          description: The name of the fiat currency.
+          example: "Australian Dollar"
+        fiat_symbol: # From Model/Fiat::$fiat_symbol
+          type: string
+          description: The symbol for the fiat currency.
+          example: "$"
+        status: # From Model/Fiat::$status
+          type: string
+          description: Status of the fiat currency.
+          example: "ACTIVE"
+    GetFiatsData: # Wrapper for the array, as seen in Model/GetFiats200ResponseAllOfData.php structure
+      type: object
+      properties:
+        fiats:
+          type: array
+          items:
+            $ref: '#/components/schemas/Fiat'
+    GetFiatsResponse: # Based on Model/GetFiats200Response.php
+      type: object
+      properties:
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+        data:
+          $ref: '#/components/schemas/GetFiatsData'
+
+    # --- Coin Schemas (Model/Coin.php, Model/Blockchain.php, Model/GetCoins200Response.php) ---
+    Blockchain: # Based on Model/Blockchain.php
+      type: object
+      properties:
+        code: # From Model/Blockchain::$code
+          type: string
+          example: "BTC"
+        description: # From Model/Blockchain::$description
+          type: string
+          example: "Bitcoin"
+        is_default: # From Model/Blockchain::$is_default
+          type: boolean
+          example: true
+        # withdrawal_fee, deposit_fee, min_withdrawal, type are also in Model/Blockchain.php
+        withdrawal_fee:
+          type: string
+          nullable: true
+          example: "0.0005"
+        deposit_fee:
+          type: string
+          nullable: true
+          example: "0"
+        min_withdrawal:
+          type: string
+          nullable: true
+          example: "0.001"
+        type:
+          type: string
+          nullable: true
+          description: "Type of blockchain (e.g. MAINNET)"
+          example: "MAINNET"
+    Coin: # Based on Model/Coin.php and docs
+      type: object
+      properties:
+        coin_code: # From Model/Coin::$coin_code
+          type: string
+          description: The unique code for the coin.
+          example: "BTC"
+        coin_name: # From Model/Coin::$coin_name
+          type: string
+          description: The name of the coin.
+          example: "Bitcoin"
+        status: # From Model/Coin::$status
+          type: string
+          description: Status of the coin.
+          example: "ACTIVE"
+        blockchains: # From Model/Coin::$blockchains (array of Blockchain)
+          type: array
+          items:
+            $ref: '#/components/schemas/Blockchain'
+    GetCoinsData:
+      type: object
+      properties:
+        coins:
+          type: array
+          items:
+            $ref: '#/components/schemas/Coin'
+    GetCoinsResponse: # Based on Model/GetCoins200Response.php
+      type: object
+      properties:
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+        data:
+          $ref: '#/components/schemas/GetCoinsData'
+
+    # --- Country Schemas (Model/Country.php, Model/GetCountries200Response.php) ---
+    Country: # Based on Model/Country.php and docs
+      type: object
+      properties:
+        country_code: # From Model/Country::$country_code
+          type: string
+          description: ISO 3166-1 alpha-2 country code.
+          example: "AU"
+        country_name: # From Model/Country::$country_name
+          type: string
+          description: Name of the country.
+          example: "Australia"
+        status: # From Model/Country::$status
+          type: string
+          description: Status.
+          example: "ACTIVE"
+        # Model/Country also has is_state_required, supported_documents
+        is_state_required:
+          type: boolean
+          nullable: true # Assuming, as not in basic doc example
+        supported_documents:
+          type: array
+          items:
+            type: string
+          nullable: true
+          example: ["PASSPORT", "DRIVER_LICENSE"]
+    GetCountriesData:
+      type: object
+      properties:
+        countries:
+          type: array
+          items:
+            $ref: '#/components/schemas/Country'
+    GetCountriesResponse: # Based on Model/GetCountries200Response.php
+      type: object
+      properties:
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+        data:
+          $ref: '#/components/schemas/GetCountriesData'
+
+    # --- PaymentMethod Schemas (Model/PaymentMethod.php, Model/TransactionFee.php, Model/GetPaymentMethods200Response.php) ---
+    TransactionFee: # Based on Model/TransactionFee.php
+      type: object
+      properties:
+        type: # From Model/TransactionFee::$type
+          type: string
+          description: Type of fee (e.g., PERCENTAGE, FIXED).
+          example: "PERCENTAGE"
+        amount: # From Model/TransactionFee::$amount
+          type: string # String for precision
+          description: Fee amount.
+          example: "2.99"
+    PaymentMethod: # Based on Model/PaymentMethod.php and docs
+      type: object
+      properties:
+        id: # From Model/PaymentMethod::$id
+          type: integer
+          format: int64
+          description: Unique identifier for the payment method.
+          example: 123
+        payment_method_type: # From Model/PaymentMethod::$payment_method_type
+          type: string
+          description: Type of payment method.
+          example: "CREDIT_CARD"
+        name: # From Model/PaymentMethod::$name
+          type: string
+          description: Display name of the payment method.
+          example: "Credit Card"
+        status: # From Model/PaymentMethod::$status
+          type: string
+          description: Status of the payment method.
+          example: "ACTIVE"
+        logo_url: # From Model/PaymentMethod::$logo_url
+          type: string
+          format: url
+          description: URL of the payment method's logo.
+          example: "https://assets.banxa.com/payment-providers/visa_master.png"
+        description: # From Model/PaymentMethod::$description
+          type: string
+          nullable: true
+          description: Description of the payment method.
+        transaction_fees: # From Model/PaymentMethod::$transaction_fees (array of TransactionFee)
+          type: array
+          items:
+            $ref: '#/components/schemas/TransactionFee'
+        supported_fiat: # From Model/PaymentMethod::$supported_fiat (array of string)
+          type: array
+          items:
+            type: string
+          description: List of supported fiat currency codes.
+          example: ["USD", "EUR"]
+        supported_coin: # From Model/PaymentMethod::$supported_coin (array of string)
+          type: array
+          items:
+            type: string
+          description: List of supported coin codes.
+          example: ["BTC", "ETH"]
+        min_amount: # From Model/PaymentMethod::$min_amount
+          type: string
+          example: "50.00"
+        max_amount: # From Model/PaymentMethod::$max_amount
+          type: string
+          example: "5000.00"
+        # Additional fields from Model/PaymentMethod.php
+        is_card:
+          type: boolean
+          nullable: true
+        is_bank_transfer:
+          type: boolean
+          nullable: true
+        is_wallet:
+          type: boolean
+          nullable: true
+        is_instant_settlement:
+          type: boolean
+          nullable: true
+        is_push_payment:
+          type: boolean
+          nullable: true
+        is_pull_payment:
+          type: boolean
+          nullable: true
+        # countries_allowed/blocked are in docs example, not explicitly in Model/PaymentMethod.php
+        # but could be part of a hydrated object not directly mapped as a DB field.
+        # For strict SDK reverse engineering, these might be omitted if not in the PHP model.
+        # However, docs are important. Let's include them as they appear in doc examples.
+        countries_allowed:
+          type: array
+          items:
+            type: string
+          example: ["US", "CA"]
+          description: "List of ISO 3166-1 alpha-2 country codes where this payment method is allowed."
+        countries_blocked:
+          type: array
+          items:
+            type: string
+          example: ["IR", "KP"]
+          description: "List of ISO 3166-1 alpha-2 country codes where this payment method is blocked."
+    GetPaymentMethodsData:
+      type: object
+      properties:
+        payment_methods:
+          type: array
+          items:
+            $ref: '#/components/schemas/PaymentMethod'
+    GetPaymentMethodsResponse: # Based on Model/GetPaymentMethods200Response.php
+      type: object
+      properties:
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+        data:
+          $ref: '#/components/schemas/GetPaymentMethodsData'
+
+    # --- Prices Schemas (Model/Price.php, Model/GetPrices200Response.php) ---
+    Price: # Based on Model/Price.php and "retrieve-quotes" doc (which is /prices endpoint)
+      type: object
+      properties:
+        payment_method_id: # From Model/Price::$payment_method_id
+          type: integer
+          format: int64
+          nullable: true # Docs example doesn't show it, SDK model has it.
+          description: ID of the payment method these prices apply to.
+          example: 123
+        spot_price_fee: # From Model/Price::$spot_price_fee
+          type: string
+          description: Fee included in the spot price.
+          example: "0.50"
+        spot_price_including_fee: # From Model/Price::$spot_price_including_fee
+          type: string
+          description: Spot price including fees.
+          example: "50000.00"
+        coin_amount: # From Model/Price::$coin_amount
+          type: string
+          description: Amount of coin.
+          example: "0.001"
+        coin_code: # From Model/Price::$coin_code
+          type: string
+          description: Coin code.
+          example: "BTC"
+        fiat_amount: # From Model/Price::$fiat_amount
+          type: string
+          description: Amount of fiat.
+          example: "50.00"
+        fiat_code: # From Model/Price::$fiat_code
+          type: string
+          description: Fiat code.
+          example: "USD"
+        network_fee: # From Model/Price::$network_fee
+          type: string
+          nullable: true
+          example: "0.0001"
+        blockchain_fee: # From Model/Price::$blockchain_fee (This is often the same as network_fee)
+          type: string
+          nullable: true
+          example: "0.00005"
+    GetPricesData: # Model/GetPrices200ResponseAllOfData.php
+      type: object
+      properties:
+        prices:
+          type: array
+          items:
+            $ref: '#/components/schemas/Price'
+    GetPricesResponse: # Based on Model/GetPrices200Response.php
+      type: object
+      properties:
+        # pagination: $ref: '#/components/schemas/Pagination' # SDK GetPrices200Response doesn't include pagination. Docs for /prices also don't show pagination.
+        data:
+          $ref: '#/components/schemas/GetPricesData'
+
+    # --- Quote Schemas (Model/CreateQuoteRequest.php, Model/Quote.php, Model/CreateQuote200Response.php) ---
+    CreateQuoteRequest: # Based on Model/CreateQuoteRequest.php
+      type: object
+      # REQUIRED_FIELDS in CreateQuoteRequest.php: source_currency, target_currency, account_reference
+      required:
+        - source_currency
+        - target_currency
+        - account_reference
+      properties:
+        source_currency: # From Model/CreateQuoteRequest::$source_currency
+          type: string
+          description: The currency code to convert from (e.g., USD, BTC).
+          example: "USD"
+        target_currency: # From Model/CreateQuoteRequest::$target_currency
+          type: string
+          description: The currency code to convert to (e.g., BTC, USD).
+          example: "BTC"
+        source_amount: # From Model/CreateQuoteRequest::$source_amount
+          type: string
+          nullable: true # Either source_amount or target_amount
+          description: Amount of source currency. Either source_amount or target_amount is required.
+          example: "100.00"
+        target_amount: # From Model/CreateQuoteRequest::$target_amount
+          type: string
+          nullable: true # Either source_amount or target_amount
+          description: Amount of target currency. Either source_amount or target_amount is required.
+          example: "0.002"
+        account_reference: # From Model/CreateQuoteRequest::$account_reference
+          type: string
+          description: Your internal reference for the user/account.
+          example: "USER-12345"
+        payment_method_id: # From Model/CreateQuoteRequest::$payment_method_id
+          type: integer
+          format: int64
+          nullable: true
+          description: Optional payment method ID to get a quote specific to it.
+          example: 123
+        blockchain: # From Model/CreateQuoteRequest::$blockchain
+          type: string
+          nullable: true
+          description: Specify blockchain for the target crypto if applicable.
+          example: "ETH"
+    Quote: # Based on Model/Quote.php
+      type: object
+      properties:
+        id: # From Model/Quote::$id
+          type: integer # PHP SDK model is int, json is number
+          format: int64
+          description: Unique identifier for the quote.
+          example: 98765
+        account_reference: # From Model/Quote::$account_reference
+          type: string
+          description: Your internal reference for the user/account.
+          example: "USER-12345"
+        fiat_currency: # From Model/Quote::$fiat_currency
+          type: string
+          description: Fiat currency code involved in the quote.
+          example: "USD"
+        coin_currency: # From Model/Quote::$coin_currency
+          type: string
+          description: Coin currency code involved in the quote.
+          example: "BTC"
+        fiat_amount: # From Model/Quote::$fiat_amount
+          type: string
+          description: Amount in fiat currency.
+          example: "100.00"
+        coin_amount: # From Model/Quote::$coin_amount
+          type: string
+          description: Amount in coin currency.
+          example: "0.002"
+        expires_at: # From Model/Quote::$expires_at (DateTimeInterface)
+          type: string
+          format: date-time # ISO 8601
+          description: Timestamp when the quote expires.
+          example: "2023-10-27T10:30:00Z"
+        created_at: # From Model/Quote::$created_at (DateTimeInterface)
+          type: string
+          format: date-time
+          example: "2023-10-27T10:00:00Z"
+        prices: # From Model/Quote::$prices (array of Price)
+          type: array
+          items:
+            $ref: '#/components/schemas/Price'
+    CreateQuoteData: # Model/CreateQuote200ResponseAllOfData.php
+      type: object
+      properties:
+        quote:
+          $ref: '#/components/schemas/Quote'
+    CreateQuoteResponse: # Model/CreateQuote200Response.php
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/CreateQuoteData'
+    GetQuoteData: # Model/GetQuote200ResponseAllOfData.php
+       type: object
+       properties:
+         quote:
+           $ref: '#/components/schemas/Quote'
+    GetQuoteResponse: # Model/GetQuote200Response.php
+       type: object
+       properties:
+         data:
+           $ref: '#/components/schemas/GetQuoteData'
+
+    # --- Order Schemas (Model/CreateOrderRequest.php, Model/Order.php, Model/CreateOrder200Response.php, etc.) ---
+    CreateOrderRequest: # Based on Model/CreateOrderRequest.php and docs for buy/sell orders
+      type: object
+      # REQUIRED_FIELDS in CreateOrderRequest.php: account_reference, fiat_currency, coin_currency, payment_method_id, return_url_on_success, return_url_on_failure
+      required:
+        - account_reference
+        - fiat_currency
+        - coin_currency
+        - payment_method_id
+        - return_url_on_success
+        - return_url_on_failure
+      properties:
+        account_reference: # Model/CreateOrderRequest::$account_reference
+          type: string
+          description: Your internal reference for the user/account.
+          example: "USER-12345"
+        fiat_currency: # Model/CreateOrderRequest::$fiat_currency
+          type: string
+          description: Fiat currency code for the order. For BUY, this is source. For SELL, this is target.
+          example: "USD"
+        coin_currency: # Model/CreateOrderRequest::$coin_currency
+          type: string
+          description: Coin currency code for the order. For BUY, this is target. For SELL, this is source.
+          example: "BTC"
+        coin_amount: # Model/CreateOrderRequest::$coin_amount
+          type: string
+          nullable: true # Either coin_amount or fiat_amount
+          description: Amount of coin to buy/sell. Provide either this or fiat_amount.
+          example: "0.01"
+        fiat_amount: # Model/CreateOrderRequest::$fiat_amount
+          type: string
+          nullable: true # Either coin_amount or fiat_amount
+          description: Amount of fiat to spend/receive. Provide either this or coin_amount.
+          example: "500.00"
+        payment_method_id: # Model/CreateOrderRequest::$payment_method_id
+          type: integer
+          format: int64
+          description: ID of the chosen payment method.
+          example: 123
+        wallet_address: # Model/CreateOrderRequest::$wallet_address
+          type: string
+          nullable: true # Required for BUY, not for SELL typically until confirmation
+          description: User's crypto wallet address (for BUY orders).
+          example: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+        wallet_address_tag: # Model/CreateOrderRequest::$wallet_address_tag
+          type: string
+          nullable: true
+          description: Tag or memo for certain wallet addresses (e.g., XRP, XLM).
+          example: "123456789"
+        return_url_on_success: # Model/CreateOrderRequest::$return_url_on_success
+          type: string
+          format: url
+          description: URL to redirect the user to on successful payment/order.
+          example: "https://yourapp.com/order/success"
+        return_url_on_failure: # Model/CreateOrderRequest::$return_url_on_failure
+          type: string
+          format: url
+          description: URL to redirect the user to on failed payment/order.
+          example: "https://yourapp.com/order/failed"
+        return_url_on_pending: # Model/CreateOrderRequest::$return_url_on_pending
+          type: string
+          format: url
+          nullable: true
+          description: URL to redirect the user to if payment is pending.
+          example: "https://yourapp.com/order/pending"
+        iframe_referral_domain: # Model/CreateOrderRequest::$iframe_referral_domain
+          type: string
+          # format: hostname # SDK type is string
+          nullable: true
+          description: If using Banxa checkout in an iframe, your domain.
+          example: "yourapp.com"
+        blockchain: # Model/CreateOrderRequest::$blockchain
+          type: string
+          nullable: true
+          description: Specify blockchain for the coin if applicable.
+          example: "ETH"
+        quote_id: # Model/CreateOrderRequest::$quote_id
+          type: string # SDK model is string, but quote.id is int. Assuming order refers to it as string.
+          nullable: true
+          description: Optional ID of a previously created quote to use for this order.
+          example: "98765" # Doc example uses string for quote_id in order request
+        # For SELL orders, the docs mention `customer_bank_account` object, not in CreateOrderRequest.php directly.
+        # This might be part of a different flow or a later step for sell orders if not in this initial request.
+        # Sticking to CreateOrderRequest.php for now. The "Confirm Sell Order" might handle this.
+    Order: # Based on Model/Order.php and docs
+      type: object
+      properties:
+        id: # Model/Order::$id
+          type: string # Matches doc example "f91cbdf6-c8e5-4f58-911a-430835945a1d"
+          description: Unique Banxa order ID.
+          example: "f91cbdf6-c8e5-4f58-911a-430835945a1d"
+        account_reference: # Model/Order::$account_reference
+          type: string
+          description: Your internal reference for the user/account.
+          example: "USER-12345"
+        order_type: # Model/Order::$order_type
+          type: string
+          description: Type of order.
+          example: "CRYPTO-BUY" # Or CRYPTO-SELL, NFT-BUY
+        fiat_currency: # Model/Order::$fiat_currency
+          type: string
+          example: "USD"
+        coin_currency: # Model/Order::$coin_currency
+          type: string
+          example: "BTC"
+        fiat_amount: # Model/Order::$fiat_amount
+          type: string
+          example: "500.00"
+        coin_amount: # Model/Order::$coin_amount
+          type: string
+          example: "0.01"
+        wallet_address: # Model/Order::$wallet_address
+          type: string
+          nullable: true # Can be null initially for some flows
+          example: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+        wallet_address_tag: # Model/Order::$wallet_address_tag
+          type: string
+          nullable: true
+        blockchain: # Model/Order::$blockchain
+          type: string
+          nullable: true
+          example: "BTC"
+        status: # Model/Order::$status
+          type: string
+          description: Current status of the order.
+          example: "PENDING_PAYMENT" # (e.g., PENDING_PAYMENT, COMPLETED, FAILED, EXPIRED, CANCELLED, REFUNDED, WAITING_PAYMENT, PAYMENT_RECEIVED, INCOMPLETE, CANCELLED_KYC)
+        checkout_url: # Model/Order::$checkout_url (For BUY orders)
+          type: string
+          format: url
+          nullable: true
+          description: URL for the user to complete payment or KYC.
+          example: "https://checkout.banxa.com/..."
+        # Sell order specific fields from Model/Order and confirm sell order doc
+        deposit_address: # Model/Order::$deposit_address (for SELL orders)
+          type: object # Structure based on "Confirm a Sell Order" doc
+          nullable: true
+          properties:
+            address:
+              type: string
+              example: "bc1q..."
+            memo: # or tag
+              type: string
+              nullable: true
+              example: "12345"
+            uri: # Full URI with amount if applicable
+              type: string
+              format: uri
+              nullable: true
+              example: "bitcoin:bc1q...?amount=0.01"
+        # General Order fields from Model/Order.php
+        payment_id:
+          type: string
+          nullable: true
+        transaction_id:
+          type: string
+          nullable: true
+        payment_method_id:
+          type: integer
+          format: int64
+          nullable: true
+        fee_amount:
+          type: string
+          nullable: true
+        network_fee_amount:
+          type: string
+          nullable: true
+        created_at: # Model/Order::$created_at (DateTimeInterface)
+          type: string
+          format: date-time
+          description: Timestamp when the order was created.
+          example: "2023-10-27T12:00:00Z"
+        # ... many other fields in Model/Order like kyc_status, kyc_url, attempts, etc.
+        # Add if commonly returned or crucial. For brevity, I'll stick to the most common ones.
+    CreateOrderData: # Model/CreateOrder200ResponseAllOfData.php
+      type: object
+      properties:
+        order:
+          $ref: '#/components/schemas/Order'
+    CreateOrderResponse: # Model/CreateOrder200Response.php
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/CreateOrderData'
+    GetOrderData: # Model/GetOrder200ResponseAllOfData.php
+      type: object
+      properties:
+        order:
+          $ref: '#/components/schemas/Order'
+    GetOrderResponse: # Model/GetOrder200Response.php
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/GetOrderData'
+    GetOrdersData: # Model/GetOrders200ResponseAllOfData.php
+      type: object
+      properties:
+        orders:
+          type: array
+          items:
+            $ref: '#/components/schemas/Order'
+    GetOrdersResponse: # Model/GetOrders200Response.php
+      type: object
+      properties:
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+        data:
+          $ref: '#/components/schemas/GetOrdersData'
+
+    # --- Sell Order Confirmation Schemas (SellOrdersApi, Model/ConfirmSellOrderRequest.php, Model/ConfirmSellOrder200Response.php) ---
+    ConfirmSellOrderRequest: # Based on Model/ConfirmSellOrderRequest.php
+      type: object
+      # REQUIRED_FIELDS in ConfirmSellOrderRequest: transaction_hash, source, source_address
+      required:
+        - transaction_hash
+        - source
+        - source_address
+      properties:
+        transaction_hash: # Model/ConfirmSellOrderRequest::$transaction_hash
+          type: string
+          description: The transaction hash (ID) of the crypto deposit made by the user.
+          example: "d8f73e8d3c17df6d876d8c59acc5f8742a319e9ab0397038e0f6915e327861c7"
+        source: # Model/ConfirmSellOrderRequest::$source
+          type: string
+          description: Source of the transaction information (e.g., BLOCKCHAIN_EXPLORER, USER_INPUT).
+          example: "BLOCKCHAIN_EXPLORER"
+        source_address: # Model/ConfirmSellOrderRequest::$source_address
+          type: string
+          description: The user's wallet address from which the crypto was sent.
+          example: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+        source_address_tag: # Model/ConfirmSellOrderRequest::$source_address_tag
+          type: string
+          nullable: true
+          description: Tag or memo for the source wallet address, if applicable.
+          example: "98765"
+    ConfirmSellOrderData: # Model/ConfirmSellOrder200ResponseAllOfData.php
+      type: object
+      properties:
+        order: # It returns the updated order object
+          $ref: '#/components/schemas/Order'
+    ConfirmSellOrderResponse: # Model/ConfirmSellOrder200Response.php
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/ConfirmSellOrderData'
+
+    # --- NFT Order Schemas (NftApi, Model/CreateNftOrderRequest.php, Model/CreateNftOrder200Response.php) ---
+    NftCheckoutData: # Model/NftCheckoutData.php (used in CreateNftOrderRequest)
+      type: object
+      properties:
+        # REQUIRED_FIELDS: name, quantity, image_url, collection_name, total_price, price_currency
+        name: # Model/NftCheckoutData::$name
+          type: string
+          example: "CryptoPunk #1234"
+        quantity: # Model/NftCheckoutData::$quantity
+          type: integer
+          example: 1
+        image_url: # Model/NftCheckoutData::$image_url
+          type: string
+          format: url
+          example: "https://example.com/nftimage.png"
+        collection_name: # Model/NftCheckoutData::$collection_name
+          type: string
+          example: "CryptoPunks"
+        total_price: # Model/NftCheckoutData::$total_price
+          type: string # Amount
+          example: "150.00"
+        price_currency: # Model/NftCheckoutData::$price_currency
+          type: string # Fiat currency code
+          example: "USD"
+        # Optional fields from NftCheckoutData.php
+        nft_id:
+          type: string
+          nullable: true
+        collection_id:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        contract_address:
+          type: string
+          nullable: true
+        attributes: # Array of objects
+          type: array
+          nullable: true
+          items:
+            type: object # Define more strictly if structure is known
+            additionalProperties: true # Allows any properties
+          example: [{"trait_type": "Background", "value": "Blue"}]
+    CreateNftOrderRequest: # Based on Model/CreateNftOrderRequest.php
+      type: object
+      # REQUIRED_FIELDS: account_reference, target_wallet_address, target_blockchain, payment_method_id, nfts, return_url_on_success, return_url_on_failure
+      required:
+        - account_reference
+        - target_wallet_address
+        - target_blockchain
+        - payment_method_id
+        - nfts
+        - return_url_on_success
+        - return_url_on_failure
+      properties:
+        account_reference: # Model/CreateNftOrderRequest::$account_reference
+          type: string
+          example: "USER-NFT-67890"
+        target_wallet_address: # Model/CreateNftOrderRequest::$target_wallet_address
+          type: string
+          example: "0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B"
+        target_blockchain: # Model/CreateNftOrderRequest::$target_blockchain
+          type: string
+          example: "ETH"
+        payment_method_id: # Model/CreateNftOrderRequest::$payment_method_id
+          type: integer
+          format: int64
+          example: 456
+        nfts: # Model/CreateNftOrderRequest::$nfts (array of NftCheckoutData)
+          type: array
+          items:
+            $ref: '#/components/schemas/NftCheckoutData'
+        return_url_on_success: # Model/CreateNftOrderRequest::$return_url_on_success
+          type: string
+          format: url
+          example: "https://yourapp.com/nft/success"
+        return_url_on_failure: # Model/CreateNftOrderRequest::$return_url_on_failure
+          type: string
+          format: url
+          example: "https://yourapp.com/nft/failed"
+        return_url_on_pending: # Model/CreateNftOrderRequest::$return_url_on_pending
+          type: string
+          format: url
+          nullable: true
+          example: "https://yourapp.com/nft/pending"
+        iframe_referral_domain: # Model/CreateNftOrderRequest::$iframe_referral_domain
+          type: string
+          nullable: true
+          example: "yourapp.com"
+        # meta_data: object, nullable - Model/CreateNftOrderRequest.php
+        meta_data:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: "Arbitrary key-value pairs for additional metadata."
+          example: {"partner_campaign_id": "SUMMER2024"}
+    CreateNftOrderData: # Model/CreateNftOrder200ResponseAllOfData.php
+      type: object
+      properties:
+        order: # Returns an Order object, potentially with NFT specific fields populated
+          $ref: '#/components/schemas/Order' # Assuming NFT orders also conform to the main Order schema
+    CreateNftOrderResponse: # Model/CreateNftOrder200Response.php
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/CreateNftOrderData'
+
+    # --- KYC Schemas (KycApi, Model/CreateKycAccountRequest.php, Model/KycAccount.php, Model/Address.php, Model/KycDocumentImage.php etc.) ---
+    # Note: "Create Identity" doc uses /identity/applications, SDK KycApi uses /kyc/accounts. Sticking to SDK.
+    Address: # Based on Model/Address.php
+      type: object
+      # REQUIRED_FIELDS: street1, suburb_city, post_code_zip, country_code
+      required:
+        - street1
+        - suburb_city
+        - post_code_zip
+        - country_code
+      properties:
+        street1: # Model/Address::$street1
+          type: string
+          example: "123 Main St"
+        street2: # Model/Address::$street2
+          type: string
+          nullable: true
+          example: "Apt 4B"
+        suburb_city: # Model/Address::$suburb_city
+          type: string
+          example: "Anytown"
+        state_province: # Model/Address::$state_province
+          type: string
+          nullable: true # Not required in model, depends on country
+          example: "CA"
+        post_code_zip: # Model/Address::$post_code_zip
+          type: string
+          example: "90210"
+        country_code: # Model/Address::$country_code (ISO 3166-1 alpha-2)
+          type: string
+          example: "US"
+    KycDocumentImage: # Based on Model/KycDocumentImage.php
+      type: object
+      # REQUIRED_FIELDS: url, content_type
+      required:
+        - url
+        - content_type
+      properties:
+        url: # Model/KycDocumentImage::$url
+          type: string
+          format: url
+          description: "URL of the uploaded document image (e.g., pre-signed S3 URL)."
+          example: "https://s3.amazonaws.com/bucket/path/to/image.jpg?AWSAccessKeyId=..."
+        content_type: # Model/KycDocumentImage::$content_type
+          type: string
+          description: "MIME type of the image."
+          example: "image/jpeg"
+        file_name: # Model/KycDocumentImage::$file_name
+          type: string
+          nullable: true
+          description: "Original file name of the image."
+          example: "passport_front.jpg"
+    CreateKycAccountRequest: # Based on Model/CreateKycAccountRequest.php
+      type: object
+      # REQUIRED_FIELDS: account_reference, given_name, surname, dob, email, mobile_number, residential_address, document_type, document_id_number, document_country_of_issue, document_images
+      required:
+        - account_reference
+        - given_name
+        - surname
+        - dob
+        - email
+        - mobile_number
+        - residential_address
+        - document_type
+        # - document_id_number # Conditional, may not be needed for all doc types
+        - document_country_of_issue
+        # - document_images # Can be submitted later in some flows
+      properties:
+        account_reference: # Model/CreateKycAccountRequest::$account_reference
+          type: string
+          example: "USER-KYC-1122"
+        given_name: # Model/CreateKycAccountRequest::$given_name
+          type: string
+          example: "John"
+        middle_name: # Model/CreateKycAccountRequest::$middle_name
+          type: string
+          nullable: true
+          example: "Robert"
+        surname: # Model/CreateKycAccountRequest::$surname
+          type: string
+          example: "Doe"
+        dob: # Model/CreateKycAccountRequest::$dob (date of birth)
+          type: string
+          format: date # YYYY-MM-DD
+          example: "1990-01-15"
+        email: # Model/CreateKycAccountRequest::$email
+          type: string
+          format: email
+          example: "john.doe@example.com"
+        mobile_number: # Model/CreateKycAccountRequest::$mobile_number
+          type: string
+          example: "+15551234567"
+        residential_address: # Model/CreateKycAccountRequest::$residential_address (type Address)
+          $ref: '#/components/schemas/Address'
+        document_type: # Model/CreateKycAccountRequest::$document_type
+          type: string
+          example: "PASSPORT" # PASSPORT, DRIVERS_LICENSE, NATIONAL_ID, RESIDENCE_PERMIT etc.
+        document_id_number: # Model/CreateKycAccountRequest::$document_id_number
+          type: string
+          nullable: true # May not be needed for all document types or initial submission.
+          example: "X1234567"
+        document_country_of_issue: # Model/CreateKycAccountRequest::$document_country_of_issue (ISO 3166-1 alpha-2)
+          type: string
+          example: "US"
+        document_images: # Model/CreateKycAccountRequest::$document_images (array of KycDocumentImage)
+          type: array
+          items:
+            $ref: '#/components/schemas/KycDocumentImage'
+          nullable: true # Can be submitted later potentially
+        # meta_data from Model/CreateKycAccountRequest.php
+        meta_data:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: "Arbitrary key-value pairs for additional metadata."
+          example: {"source_of_funds": "SALARY"}
+    KycShare: # Based on Model/KycShare.php
+      type: object
+      properties:
+        partner_name: # Model/KycShare::$partner_name
+          type: string
+          example: "Banxa"
+        status: # Model/KycShare::$status
+          type: string
+          example: "APPROVED"
+        # Other fields like `shared_at` could be added
+    KycAccount: # Based on Model/KycAccount.php
+      type: object
+      properties:
+        account_reference: # Model/KycAccount::$account_reference
+          type: string
+          example: "USER-KYC-1122"
+        kyc_application_id: # Model/KycAccount::$kyc_application_id
+          type: string
+          example: "KYCAPP-987ABC"
+        kyc_status: # Model/KycAccount::$kyc_status
+          type: string
+          description: Overall KYC status for the account.
+          example: "APPROVED" # PENDING, APPROVED, REJECTED, EXPIRED, ACTION_REQUIRED
+        kyc_url: # Model/KycAccount::$kyc_url (This is the URL to send the user to complete KYC if needed)
+          type: string
+          format: url
+          nullable: true
+          description: URL to redirect the user to for KYC process if action is required.
+          example: "https://kyc.banxa.com/..."
+        kyc_shares: # Model/KycAccount::$kyc_shares (array of KycShare)
+          type: array
+          items:
+            $ref: '#/components/schemas/KycShare'
+          nullable: true
+        created_at: # Model/KycAccount::$created_at
+          type: string
+          format: date-time
+        updated_at: # Model/KycAccount::$updated_at
+          type: string
+          format: date-time
+        # Other fields from KycAccount like `auto_kyc_eligible`, `auto_kyc_status` can be added
+    CreateKycAccountData: # Model/CreateKycAccount200ResponseAllOfData.php
+      type: object
+      properties:
+        kyc_account:
+          $ref: '#/components/schemas/KycAccount'
+    CreateKycAccountResponse: # Model/CreateKycAccount200Response.php
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/CreateKycAccountData'
+    GetKycAccountData: # Model/GetKycAccount200ResponseAllOfData.php
+      type: object
+      properties:
+        kyc_account:
+          $ref: '#/components/schemas/KycAccount'
+    GetKycAccountResponse: # Model/GetKycAccount200Response.php
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/GetKycAccountData'
+
+  responses: # Common responses based on reference/errors
+    UnauthorizedError:
+      description: Authentication information is missing or invalid. API key is invalid or not provided, or signature is incorrect.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+    ForbiddenError:
+      description: Client does not have access rights to the content or action. API key is valid but lacks permissions.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+    NotFoundError:
+      description: The specified resource was not found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+    UnprocessableEntityError: # For validation errors (HTTP 422)
+      description: The request was well-formed but was unable to be followed due to semantic errors (e.g., validation failed).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+    BadRequestError: # HTTP 400 for malformed requests
+      description: The server cannot or will not process the request due to something that is perceived to be a client error (e.g., malformed request syntax).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+    InternalServerError:
+      description: An unexpected error occurred on the server.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+    TooManyRequestsError: # HTTP 429 for rate limiting
+      description: Too many requests hit the API too quickly.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+
+# --- Paths ---
+# (Path definitions will follow, referencing the schemas above)
+# This part is too long to generate fully in one go, but I'll start with Fiats and Coins.
+# The structure will be:
+# For each Api/*.php:
+#   For each method like `getXyzAsync(param1, param2, $create_xyz_request)`:
+#     Map to `paths:` entry
+#       `summary`, `description` from docs or method comments
+#       `operationId` from method name
+#       `parameters` (path, query, header - including HMAC)
+#       `requestBody` if applicable (referencing schema for `$create_xyz_request`)
+#       `responses` (2xx success with schema, common errors)
+#       `security` (BanxaAuth)
+
+paths:
+  /fiats/{orderType}: # MODIFIED PATH AND PARAMETER based on your example
+    get:
+      tags:
+        - Fiats
+      summary: Retrieve a list of Fiat Currencies
+      description: Fetches a paginated list of all supported fiat currencies, filterable by order type (BUY or SELL).
+      operationId: getFiats # From FiatsApi::getFiatsAsync
+      parameters:
+        - $ref: '#/components/parameters/HeaderSignature'
+        - $ref: '#/components/parameters/HeaderTimestamp'
+        - $ref: '#/components/parameters/HeaderNonce'
+        - name: orderType # MODIFIED: Was 'buy_sell_mode' (query), now 'orderType' (path)
+          in: path
+          required: true
+          description: Filter fiats by their availability for 'BUY' or 'SELL' operations.
+          schema:
+            type: string
+            enum: [BUY, SELL] # Values from SDK/docs
+        - $ref: '#/components/parameters/QueryPage'    # For pagination
+        - $ref: '#/components/parameters/QueryPerPage' # For pagination
+      responses:
+        '200':
+          description: A paginated list of fiat currencies.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetFiatsResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404': # If an invalid orderType is provided that doesn't matchBUY/SELL or if the path is malformed
+          $ref: '#/components/responses/NotFoundError'
+        '422': # If parameters are invalid beyond simple path matching (e.g. pagination)
+          $ref: '#/components/responses/UnprocessableEntityError'
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - BanxaAuth: []
+
+  /coins:
+    get:
+      tags:
+        - Coins
+      summary: Retrieve a list of Crypto Currencies
+      description: Fetches a paginated list of all supported crypto currencies and their blockchain details.
+      operationId: getCoins # From CoinsApi::getCoinsAsync
+      parameters:
+        - $ref: '#/components/parameters/HeaderSignature'
+        - $ref: '#/components/parameters/HeaderTimestamp'
+        - $ref: '#/components/parameters/HeaderNonce'
+        - $ref: '#/components/parameters/QueryPage'
+        - $ref: '#/components/parameters/QueryPerPage'
+      responses:
+        '200':
+          description: A paginated list of crypto currencies.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetCoinsResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - BanxaAuth: []
+
+  /countries:
+    get:
+      tags:
+        - Countries
+      summary: Retrieve a list of Countries
+      description: Fetches a paginated list of supported countries.
+      operationId: getCountries # From CountriesApi::getCountriesAsync
+      parameters:
+        - $ref: '#/components/parameters/HeaderSignature'
+        - $ref: '#/components/parameters/HeaderTimestamp'
+        - $ref: '#/components/parameters/HeaderNonce'
+        - $ref: '#/components/parameters/QueryPage'
+        - $ref: '#/components/parameters/QueryPerPage'
+      responses:
+        '200':
+          description: A paginated list of countries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetCountriesResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - BanxaAuth: []
+
+  /payment-methods:
+    get:
+      tags:
+        - PaymentMethods
+      summary: Retrieve a list of Payment Methods
+      description: Fetches a paginated list of available payment methods, filterable by currencies and amounts.
+      operationId: getPaymentMethods # From PaymentMethodsApi::getPaymentMethodsAsync
+      parameters:
+        - $ref: '#/components/parameters/HeaderSignature'
+        - $ref: '#/components/parameters/HeaderTimestamp'
+        - $ref: '#/components/parameters/HeaderNonce'
+        - $ref: '#/components/parameters/QueryPage'
+        - $ref: '#/components/parameters/QueryPerPage'
+        - name: source # From PaymentMethodsApi method signature
+          in: query
+          description: Source currency code (e.g., USD).
+          required: false
+          schema:
+            type: string
+        - name: target # From PaymentMethodsApi method signature
+          in: query
+          description: Target currency code (e.g., BTC).
+          required: false
+          schema:
+            type: string
+        - name: source_amount # From PaymentMethodsApi method signature
+          in: query
+          description: Amount in source currency.
+          required: false
+          schema:
+            type: number # SDK string, but query often number
+            format: float
+        - name: target_amount # From PaymentMethodsApi method signature
+          in: query
+          description: Amount in target currency.
+          required: false
+          schema:
+            type: number # SDK string
+            format: float
+        - name: payment_method_type # From PaymentMethodsApi method signature
+          in: query
+          description: Filter by payment method type (e.g., CREDIT_CARD).
+          required: false
+          schema:
+            type: string
+        - name: blockchain # From PaymentMethodsApi method signature
+          in: query
+          description: Filter by specific blockchain for the target crypto.
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: A paginated list of payment methods.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetPaymentMethodsResponse'
+        '400': # Parameter validation
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '422': # Semantic errors in parameters
+          $ref: '#/components/responses/UnprocessableEntityError'
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - BanxaAuth: []
+
+  /prices:
+    get:
+      tags:
+        - Prices
+      summary: Retrieve Prices
+      description: Fetches current indicative prices for currency pairs and amounts. This is not a frozen quote.
+      operationId: getPrices # From PricesApi::getPricesAsync
+      parameters:
+        - $ref: '#/components/parameters/HeaderSignature'
+        - $ref: '#/components/parameters/HeaderTimestamp'
+        - $ref: '#/components/parameters/HeaderNonce'
+        - name: source # From PricesApi method signature, required by docs for /prices
+          in: query
+          description: Source currency code (e.g., USD).
+          required: true
+          schema:
+            type: string
+        - name: target # From PricesApi method signature, required by docs for /prices
+          in: query
+          description: Target currency code (e.g., BTC).
+          required: true
+          schema:
+            type: string
+        - name: source_amount # From PricesApi method signature
+          in: query
+          description: Amount in source currency. Provide either this or target_amount.
+          required: false
+          schema:
+            type: number # SDK string
+            format: float
+        - name: target_amount # From PricesApi method signature
+          in: query
+          description: Amount in target currency. Provide either this or source_amount.
+          required: false
+          schema:
+            type: number # SDK string
+            format: float
+        - name: payment_method_id # From PricesApi method signature
+          in: query
+          description: Specific payment method ID to get prices for.
+          required: false
+          schema:
+            type: integer
+            format: int64
+        - name: blockchain # From PricesApi method signature
+          in: query
+          description: Specific blockchain for the target crypto.
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: A list of indicative prices.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetPricesResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntityError'
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - BanxaAuth: []
+
+  /quotes:
+    post:
+      tags:
+        - Quotes
+      summary: Create a Quote
+      description: Creates a new, time-sensitive quote for a currency conversion that can be used to place an order.
+      operationId: createQuote # From QuotesApi::createQuoteAsync
+      parameters:
+        - $ref: '#/components/parameters/HeaderSignature'
+        - $ref: '#/components/parameters/HeaderTimestamp'
+        - $ref: '#/components/parameters/HeaderNonce'
+      requestBody:
+        description: Quote creation parameters.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateQuoteRequest'
+      responses:
+        '201': # Standard for resource creation
+          description: Quote created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateQuoteResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntityError'
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - BanxaAuth: []
+
+  /quotes/{id}:
+    get:
+      tags:
+        - Quotes
+      summary: Retrieve a Quote
+      description: Fetches details of a specific quote by its ID.
+      operationId: getQuote # From QuotesApi::getQuoteAsync
+      parameters:
+        - $ref: '#/components/parameters/HeaderSignature'
+        - $ref: '#/components/parameters/HeaderTimestamp'
+        - $ref: '#/components/parameters/HeaderNonce'
+        - $ref: '#/components/parameters/PathQuoteId' # name: id, type: string
+      responses:
+        '200':
+          description: Details of the quote.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetQuoteResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - BanxaAuth: []
+
+  /orders:
+    get:
+      tags:
+        - Orders
+      summary: Retrieve a list of Orders
+      description: Fetches a paginated list of orders, filterable by date, status, and account reference.
+      operationId: getOrders # From OrdersApi::getOrdersAsync
+      parameters:
+        - $ref: '#/components/parameters/HeaderSignature'
+        - $ref: '#/components/parameters/HeaderTimestamp'
+        - $ref: '#/components/parameters/HeaderNonce'
+        - $ref: '#/components/parameters/QueryPage'
+        - $ref: '#/components/parameters/QueryPerPage'
+        - name: start_date # From OrdersApi method signature
+          in: query
+          description: Start date for filtering orders (YYYY-MM-DD).
+          required: false
+          schema:
+            type: string
+            format: date
+        - name: end_date # From OrdersApi method signature
+          in: query
+          description: End date for filtering orders (YYYY-MM-DD).
+          required: false
+          schema:
+            type: string
+            format: date
+        - name: status # From OrdersApi method signature
+          in: query
+          description: Filter orders by status.
+          required: false
+          schema:
+            type: string # Could be an enum if all statuses are known and fixed
+            example: "COMPLETED"
+        - name: account_reference # From OrdersApi method signature
+          in: query
+          description: Filter orders by your internal account reference.
+          required: false
+          schema:
+            type: string
+        - name: order_id # From OrdersApi method signature
+          in: query
+          description: Filter by a specific Banxa order ID.
+          required: false
+          schema:
+            type: string
+        - name: order_type # From OrdersApi method signature
+          in: query
+          description: Filter by order type (e.g., CRYPTO-BUY, CRYPTO-SELL).
+          required: false
+          schema:
+            type: string
+            enum: [CRYPTO-BUY, CRYPTO-SELL, NFT-BUY] # Add other types if known
+      responses:
+        '200':
+          description: A paginated list of orders.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetOrdersResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntityError'
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - BanxaAuth: []
+    post:
+      tags:
+        - Orders
+      summary: Create an Order
+      description: Creates a new order (BUY or SELL). For BUY orders, a checkout_url is typically returned. For SELL orders, deposit_address details are returned.
+      operationId: createOrder # From OrdersApi::createOrderAsync
+      parameters:
+        - $ref: '#/components/parameters/HeaderSignature'
+        - $ref: '#/components/parameters/HeaderTimestamp'
+        - $ref: '#/components/parameters/HeaderNonce'
+      requestBody:
+        description: Order creation parameters.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+      responses:
+        '201':
+          description: Order created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateOrderResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntityError'
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - BanxaAuth: []
+
+  /orders/{order_id}:
+    get:
+      tags:
+        - Orders
+      summary: Retrieve an Order
+      description: Fetches details of a specific order by its Banxa ID.
+      operationId: getOrder # From OrdersApi::getOrderAsync
+      parameters:
+        - $ref: '#/components/parameters/HeaderSignature'
+        - $ref: '#/components/parameters/HeaderTimestamp'
+        - $ref: '#/components/parameters/HeaderNonce'
+        - $ref: '#/components/parameters/PathOrderId' # name: order_id, type: string
+      responses:
+        '200':
+          description: Details of the order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetOrderResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - BanxaAuth: []
+
+  /orders/{order_id}/sell/confirm:
+    post:
+      tags:
+        - SellOrders
+      summary: Confirm a Sell Order
+      description: Confirms a sell order by providing the transaction hash of the user's crypto deposit.
+      operationId: confirmSellOrder # From SellOrdersApi::confirmSellOrderAsync
+      parameters:
+        - $ref: '#/components/parameters/HeaderSignature'
+        - $ref: '#/components/parameters/HeaderTimestamp'
+        - $ref: '#/components/parameters/HeaderNonce'
+        - $ref: '#/components/parameters/PathOrderId' # name: order_id, type: string
+      requestBody:
+        description: Sell order confirmation details.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmSellOrderRequest'
+      responses:
+        '200': # Typically 200 OK for updates, or 202 Accepted if processing is async
+          description: Sell order confirmation accepted. The order status will be updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfirmSellOrderResponse' # Returns the updated order
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          $ref: '#/components/responses/NotFoundError' # If order_id not found
+        '422':
+          $ref: '#/components/responses/UnprocessableEntityError' # e.g., order not in correct state to be confirmed
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - BanxaAuth: []
+
+  /nft/orders:
+    post:
+      tags:
+        - NftOrders
+      summary: Create an NFT Order
+      description: Creates a new order for purchasing NFTs.
+      operationId: createNftOrder # From NftApi::createNftOrderAsync
+      parameters:
+        - $ref: '#/components/parameters/HeaderSignature'
+        - $ref: '#/components/parameters/HeaderTimestamp'
+        - $ref: '#/components/parameters/HeaderNonce'
+      requestBody:
+        description: NFT Order creation parameters.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateNftOrderRequest'
+      responses:
+        '201':
+          description: NFT Order created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateNftOrderResponse' # Returns an Order object
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntityError'
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - BanxaAuth: []
+
+  /kyc/accounts:
+    post:
+      tags:
+        - KYC
+      summary: Create or Update KYC Account
+      description: Submits customer KYC information to Banxa for verification. This can create a new KYC application or update an existing one.
+      operationId: createKycAccount # From KycApi::createKycAccountAsync
+      parameters:
+        - $ref: '#/components/parameters/HeaderSignature'
+        - $ref: '#/components/parameters/HeaderTimestamp'
+        - $ref: '#/components/parameters/HeaderNonce'
+      requestBody:
+        description: KYC submission details.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateKycAccountRequest'
+      responses:
+        '200': # Or 201 if strictly creating new, but SDK might handle updates with 200
+          description: KYC information submitted. Response includes the KYC account status and potentially a URL for user interaction if needed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateKycAccountResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntityError'
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - BanxaAuth: []
+
+  /kyc/accounts/{account_reference}:
+    get:
+      tags:
+        - KYC
+      summary: Retrieve KYC Account Details
+      description: Fetches KYC status and details for a given account reference.
+      operationId: getKycAccount # From KycApi::getKycAccountAsync
+      parameters:
+        - $ref: '#/components/parameters/HeaderSignature'
+        - $ref: '#/components/parameters/HeaderTimestamp'
+        - $ref: '#/components/parameters/HeaderNonce'
+        - name: account_reference
+          in: path
+          required: true
+          description: Your internal reference for the user/account used during KYC submission.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: KYC account details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetKycAccountResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - BanxaAuth: []
+
